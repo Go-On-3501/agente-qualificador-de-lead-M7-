@@ -1,0 +1,26 @@
+[
+  {
+    "nome": "Carlos Mendes",
+    "telefone": "(11) 99876-5432",
+    "produto_interesse": "Auxílio-acidente INSS",
+    "origem": "Facebook - campanha acidente trabalho",
+    "respostas_formulario": "Sofreu acidente: Sim\nData do acidente: março de 2022\nFicou com sequela: Sim, limitação no ombro direito\nRecebia pelo INSS: Recebi auxílio-doença por 8 meses, depois tive alta\nAtualmente trabalha: Sim, voltei ao trabalho mas com restrição\nJá recebe auxílio-acidente: Não",
+    "observacoes": "Lead chegou perguntando se ainda tem direito mesmo tendo tido alta"
+  },
+  {
+    "nome": "Ana Paula Ribeiro",
+    "telefone": "(21) 98765-1234",
+    "produto_interesse": "Revisão de plano de saúde",
+    "origem": "Google Ads - campanha plano saúde caro",
+    "respostas_formulario": "Tipo de plano: Coletivo por adesão\nNome da operadora: Amil\nHá quanto tempo tem o plano: 7 anos\nTeve reajuste recente: Sim, em janeiro deste ano\nPercentual de reajuste: Cerca de 45%\nQuantas pessoas no plano: Não sei, é pelo sindicato",
+    "observacoes": ""
+  },
+  {
+    "nome": "Roberto Silva",
+    "telefone": "(31) 97654-3210",
+    "produto_interesse": "Não sei",
+    "origem": "Instagram - post organico",
+    "respostas_formulario": "Motivo do contato: Quero saber sobre aposentadoria por invalidez\nSituation atual: Recebo aposentadoria por invalidez há 3 anos",
+    "observacoes": "Lead confuso sobre os produtos"
+  }
+]
