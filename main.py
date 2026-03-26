@@ -1,41 +1,25 @@
 #!/usr/bin/env python3
 """
-Agente Qualificador de Leads — Google Sheets
-M7 Assessoria Jurídica
+Agente Qualificador de Leads — M7 Assessoria Jurídica
 
-Lê leads da planilha, qualifica via Claude e salva o resultado na coluna F.
-Leads já processados (coluna F preenchida) são ignorados.
+Modos:
+  python main.py               → qualifica todos os leads pendentes
+  python main.py --dashboard   → exibe painel de estatísticas
+  python main.py --tudo        → qualifica pendentes e exibe painel
 """
 
+import argparse
 import os
 import sys
 import time
 
 import anthropic
-import gspread
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 
-# ─── Configuração ──────────────────────────────────────────────────────────────
+import dashboard as dash
+import sheets_tool as sheets
 
 load_dotenv()
-
-SPREADSHEET_ID = "1BeUqsCsL1l7W8CIeXhWqrOGBUHkNcEz3UtlTRWFe2Mk"
-SHEET_NAME = "Sheet1"          # altere se a aba tiver outro nome
-CREDENTIALS_FILE = "credentials.json"
-
-# Colunas (1-indexed)
-COL_NOME = 1       # A
-COL_TELEFONE = 2   # B
-COL_Q1 = 3         # C  — trabalhou CLT?
-COL_Q2 = 4         # D  — tem sequelas de acidente?
-COL_Q3 = 5         # E  — já pediu auxílio-acidente?
-COL_RESULTADO = 6  # F  — saída do agente
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.readonly",
-]
 
 # ─── System prompt ─────────────────────────────────────────────────────────────
 
@@ -59,99 +43,117 @@ CLASSIFICAÇÃO: [QUENTE / MORNO / FRIO]
 RECOMENDAÇÃO: [LIGAR AGORA / NUTRIR / DESCARTAR]
 RESUMO: [1 frase curta para o time comercial]"""
 
-# ─── Funções ───────────────────────────────────────────────────────────────────
 
+# ─── Qualificação via Claude ───────────────────────────────────────────────────
 
-def conectar_planilha() -> gspread.Worksheet:
-    """Autentica no Google Sheets e retorna a aba configurada."""
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SPREADSHEET_ID)
-    return sh.worksheet(SHEET_NAME)
-
-
-def qualificar_lead(nome: str, telefone: str, q1: str, q2: str, q3: str) -> str:
-    """Envia o lead para o Claude e retorna a classificação formatada."""
+def _qualificar(lead: sheets.Lead) -> str:
+    """Envia o lead ao Claude e retorna o texto de classificação."""
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    mensagem_usuario = (
-        f"Nome: {nome}\n"
-        f"Telefone: {telefone}\n"
-        f"Q1 (trabalhou CLT?): {q1}\n"
-        f"Q2 (tem sequelas de acidente?): {q2}\n"
-        f"Q3 (já pediu auxílio-acidente?): {q3}"
+    conteudo = (
+        f"Nome: {lead.nome}\n"
+        f"Telefone: {lead.telefone}\n"
+        f"Q1 (trabalhou CLT?): {lead.q1}\n"
+        f"Q2 (tem sequelas de acidente?): {lead.q2}\n"
+        f"Q3 (já pediu auxílio-acidente?): {lead.q3}"
     )
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=256,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": mensagem_usuario}],
+        messages=[{"role": "user", "content": conteudo}],
     )
 
     return response.content[0].text.strip()
 
 
-def processar_planilha():
-    """Lê os leads, qualifica os não processados e salva na coluna F."""
+# ─── Modos de execução ────────────────────────────────────────────────────────
+
+def processar(mostrar_dashboard: bool = False) -> None:
+    """Qualifica todos os leads pendentes e salva na planilha."""
     print("Conectando ao Google Sheets...")
-    ws = conectar_planilha()
+    ws = sheets.conectar()
+    leads = sheets.ler_leads(ws)
 
-    todos_registros = ws.get_all_values()
-
-    # Ignora linha de cabeçalho (linha 1)
-    linhas_dados = todos_registros[1:]
-
-    if not linhas_dados:
+    if not leads:
         print("Nenhum lead encontrado na planilha.")
         return
 
-    total = len(linhas_dados)
-    processados = 0
-    ignorados = 0
+    pendentes = [l for l in leads if not l.processado]
+    ja_feitos = len(leads) - len(pendentes)
 
-    print(f"{total} lead(s) encontrado(s).\n")
+    print(f"{len(leads)} lead(s) encontrado(s) | {ja_feitos} já qualificado(s) | {len(pendentes)} pendente(s).\n")
 
-    for idx, linha in enumerate(linhas_dados, start=2):  # linha 2 no Sheets
-        # Garante que a linha tem colunas suficientes
-        linha = linha + [""] * (COL_RESULTADO - len(linha))
-
-        nome = linha[COL_NOME - 1].strip()
-        telefone = linha[COL_TELEFONE - 1].strip()
-        q1 = linha[COL_Q1 - 1].strip()
-        q2 = linha[COL_Q2 - 1].strip()
-        q3 = linha[COL_Q3 - 1].strip()
-        resultado_existente = linha[COL_RESULTADO - 1].strip()
-
-        if not nome:
-            continue  # linha vazia
-
-        if resultado_existente:
-            print(f"[IGNORADO] Linha {idx}: {nome} — já processado.")
-            ignorados += 1
-            continue
-
-        print(f"[PROCESSANDO] Linha {idx}: {nome}...")
+    for lead in pendentes:
+        print(f"[PROCESSANDO] Linha {lead.linha}: {lead.nome}...")
 
         try:
-            resultado = qualificar_lead(nome, telefone, q1, q2, q3)
+            resultado = _qualificar(lead)
         except anthropic.APIError as e:
             print(f"  ERRO API Anthropic: {e}", file=sys.stderr)
             continue
 
-        # Salva na célula F{idx}
-        ws.update_cell(idx, COL_RESULTADO, resultado)
-        processados += 1
+        sheets.salvar_resultado(ws, lead.linha, resultado)
+        lead.resultado = resultado
+        lead.parse_resultado()
 
-        print(f"  → {resultado.splitlines()[0]}")  # exibe só a primeira linha
+        print(f"  → {lead.classificacao} | {lead.recomendacao}")
+        time.sleep(0.5)  # evita rate limit da Sheets API
 
-        # Pequena pausa para não ultrapassar rate limit da Sheets API
-        time.sleep(0.5)
+    total_processados = sum(1 for l in leads if l.processado)
+    print(f"\nConcluído. {total_processados}/{len(leads)} lead(s) qualificado(s).")
 
-    print(f"\nConcluído. Processados: {processados} | Ignorados: {ignorados}")
+    if mostrar_dashboard:
+        dash.exibir(leads)
 
 
-# ─── Entry point ───────────────────────────────────────────────────────────────
+def exibir_dashboard() -> None:
+    """Lê a planilha e exibe o painel de estatísticas sem processar nada."""
+    print("Conectando ao Google Sheets...")
+    ws = sheets.conectar()
+    leads = sheets.ler_leads(ws)
+
+    if not leads:
+        print("Nenhum lead encontrado na planilha.")
+        return
+
+    dash.exibir(leads)
+
+
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Agente Qualificador de Leads — M7 Assessoria Jurídica",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Exemplos:
+  python main.py               Qualifica leads pendentes
+  python main.py --dashboard   Exibe painel de estatísticas
+  python main.py --tudo        Qualifica pendentes e exibe painel
+        """,
+    )
+    parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="Exibe painel de estatísticas dos leads já qualificados",
+    )
+    parser.add_argument(
+        "--tudo",
+        action="store_true",
+        help="Qualifica leads pendentes e exibe o painel ao final",
+    )
+
+    args = parser.parse_args()
+
+    if args.dashboard:
+        exibir_dashboard()
+    elif args.tudo:
+        processar(mostrar_dashboard=True)
+    else:
+        processar(mostrar_dashboard=False)
+
 
 if __name__ == "__main__":
-    processar_planilha()
+    main()
