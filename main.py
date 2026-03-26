@@ -1,124 +1,157 @@
 #!/usr/bin/env python3
 """
-CLI para o Agente Qualificador de Leads - M7 Assessoria Jurídica
+Agente Qualificador de Leads — Google Sheets
+M7 Assessoria Jurídica
+
+Lê leads da planilha, qualifica via Claude e salva o resultado na coluna F.
+Leads já processados (coluna F preenchida) são ignorados.
 """
-import argparse
-import json
+
+import os
 import sys
-from agent import qualificar_lead, qualificar_lead_batch
+import time
+
+import anthropic
+import gspread
+from dotenv import load_dotenv
+from google.oauth2.service_account import Credentials
+
+# ─── Configuração ──────────────────────────────────────────────────────────────
+
+load_dotenv()
+
+SPREADSHEET_ID = "1BeUqsCsL1l7W8CIeXhWqrOGBUHkNcEz3UtlTRWFe2Mk"
+SHEET_NAME = "Sheet1"          # altere se a aba tiver outro nome
+CREDENTIALS_FILE = "credentials.json"
+
+# Colunas (1-indexed)
+COL_NOME = 1       # A
+COL_TELEFONE = 2   # B
+COL_Q1 = 3         # C  — trabalhou CLT?
+COL_Q2 = 4         # D  — tem sequelas de acidente?
+COL_Q3 = 5         # E  — já pediu auxílio-acidente?
+COL_RESULTADO = 6  # F  — saída do agente
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive.readonly",
+]
+
+# ─── System prompt ─────────────────────────────────────────────────────────────
+
+SYSTEM_PROMPT = """Você é um agente especializado em qualificação de leads para a M7 Assessoria Jurídica, \
+focado em casos de auxílio-acidente do INSS.
+
+Analise as respostas do formulário abaixo e classifique o lead com base nos critérios:
+
+Q1 — Trabalhou com carteira assinada (CLT)?
+Q2 — Ficou com alguma sequela após acidente de trabalho ou doença ocupacional?
+Q3 — Já solicitou ou recebe auxílio-acidente?
+
+CRITÉRIOS DE QUALIFICAÇÃO:
+- QUENTE (LIGAR AGORA): Q1=Sim, Q2=Sim, Q3=Não → perfil ideal, nunca solicitou e tem direito
+- MORNO (NUTRIR): Q1=Sim, Q2=Sim, Q3=Sim → já solicitou; verificar situação; pode haver revisão
+- FRIO (DESCARTAR): Q1=Não ou Q2=Não → sem base para o benefício
+
+Responda EXATAMENTE neste formato, sem texto adicional:
+
+CLASSIFICAÇÃO: [QUENTE / MORNO / FRIO]
+RECOMENDAÇÃO: [LIGAR AGORA / NUTRIR / DESCARTAR]
+RESUMO: [1 frase curta para o time comercial]"""
+
+# ─── Funções ───────────────────────────────────────────────────────────────────
 
 
-def interativo():
-    """Modo interativo: coleta dados do lead via terminal."""
-    print("\n" + "=" * 60)
-    print("  AGENTE QUALIFICADOR DE LEADS — M7 ASSESSORIA JURÍDICA")
-    print("=" * 60)
-    print("\nPreencha os dados do lead:\n")
+def conectar_planilha() -> gspread.Worksheet:
+    """Autentica no Google Sheets e retorna a aba configurada."""
+    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(SPREADSHEET_ID)
+    return sh.worksheet(SHEET_NAME)
 
-    nome = input("Nome: ").strip()
-    telefone = input("Telefone: ").strip()
-    produto_interesse = input("Produto de interesse: ").strip()
-    origem = input("Origem (campanha/LP): ").strip()
 
-    print("Respostas do formulário (pressione Enter duas vezes para finalizar):")
-    linhas = []
-    while True:
-        linha = input()
-        if linha == "" and linhas and linhas[-1] == "":
-            break
-        linhas.append(linha)
-    respostas_formulario = "\n".join(linhas).strip()
+def qualificar_lead(nome: str, telefone: str, q1: str, q2: str, q3: str) -> str:
+    """Envia o lead para o Claude e retorna a classificação formatada."""
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    observacoes = input("\nObservações adicionais (opcional): ").strip()
-
-    print("\n" + "-" * 60)
-    print("AVALIAÇÃO DO LEAD:")
-    print("-" * 60 + "\n")
-
-    qualificar_lead(
-        nome=nome,
-        telefone=telefone,
-        produto_interesse=produto_interesse,
-        origem=origem,
-        respostas_formulario=respostas_formulario,
-        observacoes=observacoes,
+    mensagem_usuario = (
+        f"Nome: {nome}\n"
+        f"Telefone: {telefone}\n"
+        f"Q1 (trabalhou CLT?): {q1}\n"
+        f"Q2 (tem sequelas de acidente?): {q2}\n"
+        f"Q3 (já pediu auxílio-acidente?): {q3}"
     )
 
-
-def arquivo(path: str):
-    """Modo arquivo: lê leads de um JSON e processa em lote."""
-    try:
-        with open(path, encoding="utf-8") as f:
-            leads = json.load(f)
-    except FileNotFoundError:
-        print(f"Erro: arquivo '{path}' não encontrado.", file=sys.stderr)
-        sys.exit(1)
-    except json.JSONDecodeError as e:
-        print(f"Erro ao ler JSON: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    if not isinstance(leads, list):
-        leads = [leads]
-
-    resultados = qualificar_lead_batch(leads)
-
-    output_path = path.replace(".json", "_avaliados.json")
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(resultados, f, ensure_ascii=False, indent=2)
-
-    print(f"\n\nResultados salvos em: {output_path}")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Agente Qualificador de Leads — M7 Assessoria Jurídica",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Exemplos:
-  python main.py                          # modo interativo
-  python main.py --arquivo leads.json     # processar arquivo JSON
-  python main.py --exemplo                # qualificar lead de exemplo
-        """,
-    )
-    parser.add_argument(
-        "--arquivo",
-        metavar="PATH",
-        help="Caminho para arquivo JSON com lista de leads",
-    )
-    parser.add_argument(
-        "--exemplo",
-        action="store_true",
-        help="Qualificar um lead de exemplo para demonstração",
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=256,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": mensagem_usuario}],
     )
 
-    args = parser.parse_args()
+    return response.content[0].text.strip()
 
-    if args.arquivo:
-        arquivo(args.arquivo)
-    elif args.exemplo:
-        print("\n" + "=" * 60)
-        print("  AGENTE QUALIFICADOR DE LEADS — M7 ASSESSORIA JURÍDICA")
-        print("  [LEAD DE EXEMPLO]")
-        print("=" * 60 + "\n")
 
-        qualificar_lead(
-            nome="Carlos Mendes",
-            telefone="(11) 99876-5432",
-            produto_interesse="Auxílio-acidente INSS",
-            origem="Facebook - campanha acidente trabalho",
-            respostas_formulario=(
-                "Sofreu acidente: Sim\n"
-                "Data do acidente: março de 2022\n"
-                "Ficou com sequela: Sim, limitação no ombro direito\n"
-                "Recebia pelo INSS: Recebi auxílio-doença por 8 meses, depois tive alta\n"
-                "Atualmente trabalha: Sim, voltei ao trabalho mas com restrição\n"
-                "Já recebe auxílio-acidente: Não"
-            ),
-            observacoes="Lead chegou perguntando se ainda tem direito mesmo tendo tido alta",
-        )
-    else:
-        interativo()
+def processar_planilha():
+    """Lê os leads, qualifica os não processados e salva na coluna F."""
+    print("Conectando ao Google Sheets...")
+    ws = conectar_planilha()
 
+    todos_registros = ws.get_all_values()
+
+    # Ignora linha de cabeçalho (linha 1)
+    linhas_dados = todos_registros[1:]
+
+    if not linhas_dados:
+        print("Nenhum lead encontrado na planilha.")
+        return
+
+    total = len(linhas_dados)
+    processados = 0
+    ignorados = 0
+
+    print(f"{total} lead(s) encontrado(s).\n")
+
+    for idx, linha in enumerate(linhas_dados, start=2):  # linha 2 no Sheets
+        # Garante que a linha tem colunas suficientes
+        linha = linha + [""] * (COL_RESULTADO - len(linha))
+
+        nome = linha[COL_NOME - 1].strip()
+        telefone = linha[COL_TELEFONE - 1].strip()
+        q1 = linha[COL_Q1 - 1].strip()
+        q2 = linha[COL_Q2 - 1].strip()
+        q3 = linha[COL_Q3 - 1].strip()
+        resultado_existente = linha[COL_RESULTADO - 1].strip()
+
+        if not nome:
+            continue  # linha vazia
+
+        if resultado_existente:
+            print(f"[IGNORADO] Linha {idx}: {nome} — já processado.")
+            ignorados += 1
+            continue
+
+        print(f"[PROCESSANDO] Linha {idx}: {nome}...")
+
+        try:
+            resultado = qualificar_lead(nome, telefone, q1, q2, q3)
+        except anthropic.APIError as e:
+            print(f"  ERRO API Anthropic: {e}", file=sys.stderr)
+            continue
+
+        # Salva na célula F{idx}
+        ws.update_cell(idx, COL_RESULTADO, resultado)
+        processados += 1
+
+        print(f"  → {resultado.splitlines()[0]}")  # exibe só a primeira linha
+
+        # Pequena pausa para não ultrapassar rate limit da Sheets API
+        time.sleep(0.5)
+
+    print(f"\nConcluído. Processados: {processados} | Ignorados: {ignorados}")
+
+
+# ─── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    main()
+    processar_planilha()
