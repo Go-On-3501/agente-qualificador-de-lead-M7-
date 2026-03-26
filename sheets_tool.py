@@ -72,8 +72,20 @@ class Lead:
 # ─── Funções públicas ─────────────────────────────────────────────────────────
 
 def conectar() -> gspread.Worksheet:
-    """Autentica e retorna o worksheet configurado."""
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+    """
+    Autentica e retorna o worksheet configurado.
+
+    Tenta dois métodos em ordem:
+      1. st.secrets["gcp_service_account"] — usado no Streamlit Cloud
+      2. credentials.json local — usado em desenvolvimento
+    """
+    try:
+        import streamlit as st  # só disponível quando rodando via Streamlit
+        info = dict(st.secrets["gcp_service_account"])
+        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+    except Exception:
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+
     gc = gspread.authorize(creds)
     return gc.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
 
